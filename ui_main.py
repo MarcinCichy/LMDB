@@ -1,71 +1,120 @@
+# FILE: E:/Programowanie/Project/LMDB/ui_main.py
+
 from PyQt5.QtWidgets import (
     QMainWindow, QVBoxLayout, QLabel, QPushButton, QTableWidget,
     QTableWidgetItem, QMessageBox, QComboBox, QHBoxLayout, QWidget,
-    QAction, QMenuBar, QGraphicsView, QGraphicsScene, QFileDialog
+    QGraphicsView, QGraphicsScene, QFileDialog, QGraphicsLineItem
 )
-from PyQt5.QtCore import Qt, QPoint
+from PyQt5.QtCore import Qt, QPoint, QPointF, QRectF, QLineF
+from PyQt5.QtGui import QTransform, QPainter, QPen, QColor, QPainterPath
 import ezdxf
-from PyQt5.QtGui import QPainter
 
 
+##############################
+# Klasa CustomGraphicsView
+##############################
 class CustomGraphicsView(QGraphicsView):
-    """Rozszerzony QGraphicsView z obsługą przesuwania i powiększania."""
+    """QGraphicsView rozszerzony o panning oraz wykrywanie kliknięć w pobliżu linii gięcia."""
+
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.setRenderHint(QPainter.Antialiasing)  # Włącz antyaliasing
-        self.setDragMode(QGraphicsView.NoDrag)  # Domyślny tryb: brak przeciągania
-        self.setInteractive(True)  # Umożliwia interakcję z elementami
-        self.setTransformationAnchor(QGraphicsView.AnchorUnderMouse)  # Powiększanie wokół kursora
-        self.setResizeAnchor(QGraphicsView.AnchorViewCenter)  # Skalowanie względem centrum widoku
-        self._dragging = False  # Flaga przesuwania
-        self._last_mouse_position = QPoint()  # Ostatnia pozycja myszy
-        self.padding = 500  # Dodatkowy obszar sceny w pikselach
+        self.setRenderHint(QPainter.Antialiasing)
+        # Ustawiamy tryb panujący – ScrollHandDrag umożliwia przesuwanie niezależnie od zoomu
+        self.setDragMode(QGraphicsView.ScrollHandDrag)
+        self.setInteractive(True)
+        self.setTransformationAnchor(QGraphicsView.AnchorUnderMouse)
+        self.setResizeAnchor(QGraphicsView.AnchorViewCenter)
+        self._mouse_pressed_position = QPoint()
+        self.padding = 500  # Dodatkowy obszar sceny
+        self.main_window = None  # Referencja do głównego okna
 
     def set_scene_padding(self):
-        """Dodaje obszar wokół rysunku, aby umożliwić przesuwanie."""
         if self.scene() is not None:
-            # Pobierz oryginalny obszar sceny
             original_rect = self.scene().itemsBoundingRect()
-            # Powiększ obszar o zadany padding
-            padded_rect = original_rect.adjusted(
-                -self.padding, -self.padding, self.padding, self.padding
-            )
+            padded_rect = original_rect.adjusted(-self.padding, -self.padding, self.padding, self.padding)
             self.scene().setSceneRect(padded_rect)
 
+    def _distance_to_point(self, line: QLineF, point: QPointF) -> float:
+        A = line.p1()
+        B = line.p2()
+        P = point
+        AB = B - A
+        AP = P - A
+        ab2 = AB.x() ** 2 + AB.y() ** 2
+        if ab2 == 0:
+            return (AP.x() ** 2 + AP.y() ** 2) ** 0.5
+        t = (AP.x() * AB.x() + AP.y() * AB.y()) / ab2
+        if t < 0:
+            closest = A
+        elif t > 1:
+            closest = B
+        else:
+            closest = QPointF(A.x() + t * AB.x(), A.y() + t * AB.y())
+        dx = P.x() - closest.x()
+        dy = P.y() - closest.y()
+        return (dx * dx + dy * dy) ** 0.5
+
     def mousePressEvent(self, event):
-        """Rozpoczęcie przesuwania sceny."""
         if event.button() == Qt.LeftButton:
-            self.setCursor(Qt.ClosedHandCursor)  # Zmień kursor na "zamkniętą łapkę"
-            self._dragging = True
-            self._last_mouse_position = event.pos()  # Zapisz pozycję myszy
+            self._mouse_pressed_position = event.pos()
+            self.viewport().setCursor(Qt.ClosedHandCursor)
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event):
-        """Przesuwanie sceny w odpowiedzi na ruch myszy."""
-        if self._dragging:
-            delta = event.pos() - self._last_mouse_position  # Oblicz różnicę pozycji
-            self._last_mouse_position = event.pos()  # Zaktualizuj ostatnią pozycję myszy
-            self.horizontalScrollBar().setValue(self.horizontalScrollBar().value() - delta.x())
-            self.verticalScrollBar().setValue(self.verticalScrollBar().value() - delta.y())
+        if self.main_window is not None:
+            scene_pos = self.mapToScene(event.pos())
+            self.main_window.update_status_bar(scene_pos)
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event):
-        """Zakończenie przesuwania sceny."""
         if event.button() == Qt.LeftButton:
-            self.setCursor(Qt.ArrowCursor)  # Przywróć domyślny kursor
-            self._dragging = False
+            self.viewport().setCursor(Qt.OpenHandCursor)
+            # Jeśli odległość między pozycją naciśnięcia a zwolnienia jest mniejsza niż 10 pikseli – traktujemy jako kliknięcie
+            if (event.pos() - self._mouse_pressed_position).manhattanLength() < 10:
+                try:
+                    pos = self.mapToScene(event.pos())
+                    print("Mouse released at scene pos:", pos)
+                    tolerance = 20.0
+                    search_rect = QRectF(pos.x() - tolerance, pos.y() - tolerance, tolerance * 2, tolerance * 2)
+                    items = self.scene().items(search_rect, Qt.IntersectsItemShape)
+                    closest_item = None
+                    closest_distance = tolerance
+                    for item in items:
+                        if isinstance(item, QGraphicsLineItem) and item.data(0) == "bending":
+                            p1 = item.mapToScene(item.line().p1())
+                            p2 = item.mapToScene(item.line().p2())
+                            qline = QLineF(p1, p2)
+                            distance = self._distance_to_point(qline, pos)
+                            print("Found bending line with distance:", distance)
+                            if distance < closest_distance:
+                                closest_distance = distance
+                                closest_item = item
+                    if closest_item is not None:
+                        p1 = closest_item.mapToScene(closest_item.line().p1())
+                        p2 = closest_item.mapToScene(closest_item.line().p2())
+                        qline = QLineF(p1, p2)
+                        clicked_point = QPointF((qline.x1() + qline.x2()) / 2, (qline.y1() + qline.y2()) / 2)
+                        print("Closest bending line found. Center at:", clicked_point)
+                        if self.main_window:
+                            self.main_window.handle_bending_line_click(closest_item, clicked_point)
+                    else:
+                        print("No bending line found within tolerance.")
+                except Exception as e:
+                    print("Exception in mouseReleaseEvent:", e)
         super().mouseReleaseEvent(event)
 
     def wheelEvent(self, event):
-        """Obsługuje powiększanie i pomniejszanie za pomocą kółka myszy."""
         zoom_in_factor = 1.1
         zoom_out_factor = 1 / zoom_in_factor
-
-        if event.angleDelta().y() > 0:  # Zoom in
+        if event.angleDelta().y() > 0:
             self.scale(zoom_in_factor, zoom_in_factor)
-        else:  # Zoom out
+        else:
             self.scale(zoom_out_factor, zoom_out_factor)
 
+
+##############################
+# Klasa MainWindow
+##############################
 class MainWindow(QMainWindow):
     def __init__(self, data, model, matrix_config_editor, data_editor):
         super().__init__()
@@ -74,188 +123,314 @@ class MainWindow(QMainWindow):
         self.model = model
         self.matrix_config_editor = matrix_config_editor
         self.data_editor = data_editor
-
-        # Scena DXF dla widoku graficznego
+        self.last_selected_x = None  # Absolutny x ostatnio zaznaczonej linii
         self.dxf_scene = QGraphicsScene()
-
         self.init_ui()
-
-        # Uruchom w trybie zmaksymalizowanym
         self.showMaximized()
 
     def init_ui(self):
-        """Inicjalizuje interfejs użytkownika."""
-        self.main_widget = QWidget()
-        self.main_layout = QHBoxLayout()  # Główne okno: lewa i prawa sekcja
+        # Pasek stanu do wyświetlania współrzędnych
+        self.status_bar = self.statusBar()
+        self.status_bar.showMessage("X: 0.00, Y: 0.00")
 
-        # Lewa sekcja (parametry + tabela segmentów)
+        self.main_widget = QWidget()
+        self.main_layout = QHBoxLayout()
+
+        # Lewa sekcja – parametry i tabela segmentów
         left_widget = QWidget()
         left_layout = QVBoxLayout()
 
-        # Sekcja parametrów
         params_layout = QHBoxLayout()
-
         self.grubosc_input = QComboBox()
         self.grubosc_input.currentIndexChanged.connect(self.update_v_input)
         params_layout.addWidget(QLabel("Grubość [mm]:"))
         params_layout.addWidget(self.grubosc_input)
-
         self.V_input = QComboBox()
         params_layout.addWidget(QLabel("V [mm]:"))
         params_layout.addWidget(self.V_input)
-
         self.material_input = QComboBox()
         self.material_input.addItems(["CZ", "N"])
         params_layout.addWidget(QLabel("Materiał:"))
         params_layout.addWidget(self.material_input)
-
         left_layout.addLayout(params_layout)
 
-        # Tabela segmentów
-        self.table = QTableWidget(0, 3)
-        self.table.setHorizontalHeaderLabels(["Długość [mm]", "Kąt gięcia [°]", "BD [mm]"])
+        self.table = QTableWidget(0, 4)
+        self.table.setHorizontalHeaderLabels(["Długość [mm]", "Kąt gięcia [°]", "BD [mm]", ""])
+        self.table.horizontalHeader().setStretchLastSection(False)
+        self.table.setColumnWidth(3, 30)
         left_layout.addWidget(self.table)
+        # Resetowanie tabeli – przy wczytaniu nowego rysunku chcemy wyczyścić wcześniejsze dane
+        self.table.setRowCount(0)
+        self.last_selected_x = None
+        self.remove_all_plus_rows()
+        self.ensure_plus_row()
 
-        # Przyciski do zarządzania segmentami
-        buttons_layout = QHBoxLayout()
-        add_segment_button = QPushButton("Dodaj Segment")
-        add_segment_button.clicked.connect(self.add_segment)
-        buttons_layout.addWidget(add_segment_button)
-
-        remove_segment_button = QPushButton("Usuń Segment")
-        remove_segment_button.clicked.connect(self.remove_segment)
-        buttons_layout.addWidget(remove_segment_button)
-
-        left_layout.addLayout(buttons_layout)
-
-        # Przycisk obliczania
         self.calculate_button = QPushButton("Oblicz Łączną Długość")
         self.calculate_button.clicked.connect(self.calculate_total_bd)
         left_layout.addWidget(self.calculate_button)
 
-        # Wyniki
         self.result_label = QLabel()
         self.result_label.setAlignment(Qt.AlignCenter)
         left_layout.addWidget(self.result_label)
 
         left_widget.setLayout(left_layout)
-        left_widget.setFixedWidth(400)  # Stała szerokość lewej części
+        left_widget.setFixedWidth(400)
 
-        # Prawa sekcja (widok DXF)
+        # Prawa sekcja – widok DXF
         right_widget = QWidget()
         right_layout = QVBoxLayout()
-
         load_dxf_button = QPushButton("Wczytaj Plik DXF")
         load_dxf_button.clicked.connect(self.load_dxf_file)
         right_layout.addWidget(load_dxf_button)
-
         self.dxf_view = CustomGraphicsView()
         self.dxf_view.setScene(self.dxf_scene)
+        self.dxf_view.setAlignment(Qt.AlignCenter)
+        self.dxf_view.setDragMode(QGraphicsView.ScrollHandDrag)
+        self.dxf_view.main_window = self
         right_layout.addWidget(self.dxf_view)
-
         right_widget.setLayout(right_layout)
 
-        # Dodanie sekcji do głównego układu
-        self.main_layout.addWidget(left_widget, stretch=1)  # Lewa część proporcja 1
-        self.main_layout.addWidget(right_widget, stretch=3)  # Prawa część proporcja 3
+        self.main_layout.addWidget(left_widget, stretch=1)
+        self.main_layout.addWidget(right_widget, stretch=3)
 
         self.main_widget.setLayout(self.main_layout)
         self.setCentralWidget(self.main_widget)
 
+    def update_status_bar(self, pos: QPointF):
+        msg = f"X: {pos.x():.2f}, Y: {pos.y():.2f}"
+        self.status_bar.showMessage(msg)
+
+    def remove_all_plus_rows(self):
+        for row in range(self.table.rowCount() - 1, -1, -1):
+            widget = self.table.cellWidget(row, 0)
+            if widget is not None and getattr(widget, 'plus_row', False):
+                self.table.removeRow(row)
+
+    def ensure_plus_row(self):
+        row_count = self.table.rowCount()
+        if row_count > 0:
+            widget = self.table.cellWidget(row_count - 1, 0)
+            if widget is not None and getattr(widget, 'plus_row', False):
+                return
+        self.add_plus_row()
+
+    def add_plus_row(self):
+        row = self.table.rowCount()
+        self.table.insertRow(row)
+        plus_button = QPushButton("+")
+        plus_button.setStyleSheet(
+            "QPushButton { background-color: green; color: white; font-weight: bold; max-width: 30px; }")
+        plus_button.plus_row = True
+        plus_button.clicked.connect(self.add_segment_via_plus)
+        self.table.setCellWidget(row, 0, plus_button)
+        for col in range(1, 4):
+            self.table.setItem(row, col, QTableWidgetItem(""))
+
+    def add_segment_via_plus(self):
+        self.remove_all_plus_rows()
+        self.insert_segment_row(self.table.rowCount(), absolute_x=100.0)  # Wartość domyślna
+        self.add_plus_row()
+        self.recalc_segments()
+
+    def insert_segment_row(self, row, absolute_x, default_angle=90, line_id=None):
+        self.table.insertRow(row)
+        dlugosc_item = QTableWidgetItem(f"{absolute_x:.2f}")
+        dlugosc_item.setData(Qt.UserRole + 1, absolute_x)
+        if line_id is not None:
+            dlugosc_item.setData(Qt.UserRole, line_id)
+        self.table.setItem(row, 0, dlugosc_item)
+        kat_item = QTableWidgetItem(f"{default_angle}")
+        self.table.setItem(row, 1, kat_item)
+        bd_item = QTableWidgetItem("")
+        bd_item.setFlags(Qt.ItemIsEnabled)
+        self.table.setItem(row, 2, bd_item)
+        remove_button = QPushButton("-")
+        remove_button.setStyleSheet(
+            "QPushButton { background-color: red; color: white; font-weight: bold; max-width: 30px; }")
+        remove_button.clicked.connect(self.remove_segment_by_button)
+        self.table.setCellWidget(row, 3, remove_button)
+
+    def insert_segment_sorted(self, new_x, line_id):
+        insertion_index = self.table.rowCount() - 1  # Przed plus row
+        for row in range(self.table.rowCount() - 1):
+            item = self.table.item(row, 0)
+            if item is not None:
+                existing_x = item.data(Qt.UserRole + 1)
+                if existing_x is None:
+                    existing_x = 0.0
+                if new_x < existing_x:
+                    insertion_index = row
+                    break
+        self.insert_segment_row(insertion_index, absolute_x=new_x, default_angle=90, line_id=line_id)
+        self.recalc_segments()
+
+    def recalc_segments(self):
+        n = self.table.rowCount() - 1  # Pomijamy plus row
+        if n <= 0:
+            return
+        segments = []
+        for row in range(n):
+            item = self.table.item(row, 0)
+            if item is not None:
+                absolute_x = item.data(Qt.UserRole + 1)
+                segments.append((row, absolute_x))
+        segments.sort(key=lambda x: x[1])
+        prev_x = None
+        for (row, absolute_x) in segments:
+            if prev_x is None:
+                segment_value = absolute_x
+            else:
+                segment_value = absolute_x - prev_x
+            prev_x = absolute_x
+            self.table.item(row, 0).setText(f"{segment_value:.2f}")
+
+    def find_segment_row_by_line_id(self, line_id):
+        for row in range(self.table.rowCount() - 1):
+            item = self.table.item(row, 0)
+            if item is not None and item.data(Qt.UserRole) == line_id:
+                return row
+        return None
+
+    def remove_segment_by_button(self):
+        button = self.sender()
+        if button:
+            for row in range(self.table.rowCount()):
+                widget = self.table.cellWidget(row, 3)
+                if widget is button:
+                    item = self.table.item(row, 0)
+                    if item is not None:
+                        line_id = item.data(Qt.UserRole)
+                        if line_id is not None:
+                            for scene_item in self.dxf_scene.items():
+                                if isinstance(scene_item, QGraphicsLineItem) and scene_item.data(1) == "selected":
+                                    if id(scene_item) == line_id:
+                                        pen = QPen(QColor("yellow"))
+                                        scene_item.setPen(pen)
+                                        scene_item.setData(1, None)
+                                        print("Minus clicked: Unselected bending line with id", line_id)
+                                        break
+                    self.table.removeRow(row)
+                    break
+        if self.table.rowCount() == 0:
+            self.add_plus_row()
+        else:
+            self.recalc_segments()
+
     def load_dxf_file(self):
-        """Wczytuje plik DXF i wyświetla jego zawartość."""
         file_path, _ = QFileDialog.getOpenFileName(self, "Wybierz Plik DXF", "", "Pliki DXF (*.dxf)")
         if not file_path:
             return
-
         try:
+            # Resetujemy tabelę segmentów i zmienną last_selected_x
+            self.table.setRowCount(0)
+            self.last_selected_x = None
+            self.remove_all_plus_rows()
+            self.ensure_plus_row()
+
             doc = ezdxf.readfile(file_path)
             self.dxf_scene.clear()
-
-            # Renderowanie elementów DXF
             for entity in doc.modelspace():
                 if entity.dxftype() == 'LINE':
                     start = entity.dxf.start
                     end = entity.dxf.end
-                    self.dxf_scene.addLine(start.x, -start.y, end.x, -end.y)
+                    if hasattr(entity.dxf, 'color') and entity.dxf.color == 2:
+                        pen = QPen(QColor("yellow"))
+                        bending_line = QGraphicsLineItem(start.x, -start.y, end.x, -end.y)
+                        bending_line.setPen(pen)
+                        bending_line.setData(0, "bending")
+                        self.dxf_scene.addItem(bending_line)
+                    else:
+                        self.dxf_scene.addLine(start.x, -start.y, end.x, -end.y)
                 elif entity.dxftype() == 'CIRCLE':
                     center = entity.dxf.center
                     radius = entity.dxf.radius
-                    self.dxf_scene.addEllipse(
-                        center.x - radius, -center.y - radius, 2 * radius, 2 * radius
-                    )
+                    self.dxf_scene.addEllipse(center.x - radius, -center.y - radius, 2 * radius, 2 * radius)
                 elif entity.dxftype() == 'ARC':
-                    # Renderowanie łuków
                     center = entity.dxf.center
                     radius = entity.dxf.radius
                     start_angle = entity.dxf.start_angle
                     end_angle = entity.dxf.end_angle
-
-                    # Przekształcenie kątów na układ Qt (0 stopni = godzina 3)
                     start_angle_qt = -start_angle
                     span_angle_qt = -(end_angle - start_angle)
-
-                    # Tworzenie prostokąta opisującego łuk
-                    rect = QRectF(
-                        center.x - radius, -center.y - radius, 2 * radius, 2 * radius
-                    )
+                    rect = QRectF(center.x - radius, -center.y - radius, 2 * radius, 2 * radius)
                     path = QPainterPath()
                     path.arcMoveTo(rect, start_angle_qt)
                     path.arcTo(rect, start_angle_qt, span_angle_qt)
                     self.dxf_scene.addPath(path)
                 elif entity.dxftype() == 'POLYLINE':
-                    # Renderowanie polilinii
                     points = [point for point in entity.points()]
                     for i in range(len(points) - 1):
-                        self.dxf_scene.addLine(
-                            points[i][0], -points[i][1], points[i + 1][0], -points[i + 1][1]
-                        )
+                        self.dxf_scene.addLine(points[i][0], -points[i][1],
+                                               points[i + 1][0], -points[i + 1][1])
                 elif entity.dxftype() == 'LWPOLYLINE':
-                    # Renderowanie LWPOLYLINE z opcjonalnymi zaokrągleniami
                     points = list(entity.points())
                     for i in range(len(points)):
                         start_point = points[i]
-                        end_point = points[(i + 1) % len(points)]  # Kolejny punkt lub początek
-                        bulge = start_point[4] if len(start_point) > 4 else 0  # Współczynnik zaokrąglenia
+                        end_point = points[(i + 1) % len(points)]
+                        bulge = start_point[4] if len(start_point) > 4 else 0
                         if bulge == 0:
-                            # Rysuj linię prostą
-                            self.dxf_scene.addLine(
-                                start_point[0], -start_point[1], end_point[0], -end_point[1]
-                            )
+                            self.dxf_scene.addLine(start_point[0], -start_point[1],
+                                                   end_point[0], -end_point[1])
                         else:
-                            # Rysuj łuk na podstawie bulge
                             self.draw_bulge_arc(start_point, end_point, bulge)
                 else:
                     print(f"Nieobsługiwany typ: {entity.dxftype()}")
-
-            # Centrowanie widoku
-            self.dxf_view.fitInView(self.dxf_scene.itemsBoundingRect(), Qt.KeepAspectRatio)
-
+            self.adjust_scene_origin()
+            self.dxf_view.resetTransform()
+            self.dxf_view.fitInView(self.dxf_scene.sceneRect(), Qt.KeepAspectRatio)
+            self.dxf_view.centerOn(self.dxf_scene.sceneRect().center())
         except Exception as e:
             QMessageBox.warning(self, "Błąd", f"Nie udało się wczytać pliku DXF:\n{e}")
 
     def draw_bulge_arc(self, start_point, end_point, bulge):
-        """Rysuje łuk na podstawie współczynnika bulge."""
         import math
-
-        # Oblicz promień i środek okręgu
-        chord_length = math.sqrt(
-            (end_point[0] - start_point[0]) ** 2 + (end_point[1] - start_point[1]) ** 2
-        )
+        chord_length = math.sqrt((end_point[0] - start_point[0]) ** 2 + (end_point[1] - start_point[1]) ** 2)
         radius = abs(chord_length / (2 * math.sin(2 * math.atan(bulge))))
         center_x = (start_point[0] + end_point[0]) / 2
         center_y = (start_point[1] + end_point[1]) / 2
         angle_start = math.degrees(math.atan2(start_point[1] - center_y, start_point[0] - center_x))
         angle_end = math.degrees(math.atan2(end_point[1] - center_y, end_point[0] - center_x))
-
         rect = QRectF(center_x - radius, -center_y - radius, 2 * radius, 2 * radius)
         path = QPainterPath()
         path.arcMoveTo(rect, angle_start)
         path.arcTo(rect, angle_start, angle_end - angle_start)
         self.dxf_scene.addPath(path)
 
+    def adjust_scene_origin(self):
+        # Przesuwamy elementy tak, aby dolny lewy róg bounding recta był w (0,0)
+        bounding_rect = self.dxf_scene.itemsBoundingRect()
+        print("Before adjust_scene_origin, bounding_rect:", bounding_rect)
+        dx = -bounding_rect.left()
+        dy = -bounding_rect.bottom()
+        for item in self.dxf_scene.items():
+            item.moveBy(dx, dy)
+        new_rect = self.dxf_scene.itemsBoundingRect()
+        self.dxf_scene.setSceneRect(0, 0, new_rect.width(), new_rect.height())
+        print("After adjust_scene_origin, sceneRect:", self.dxf_scene.sceneRect())
+
+    def handle_bending_line_click(self, item, clicked_point):
+        new_line_x = clicked_point.x()
+        print("handle_bending_line_click - clicked_point:", clicked_point)
+        # Toggle: jeśli linia już zaznaczona, odznacz ją
+        if item.data(1) == "selected":
+            row_index = self.find_segment_row_by_line_id(id(item))
+            if row_index is not None:
+                self.table.removeRow(row_index)
+            item.setData(1, None)
+            pen = QPen(QColor("yellow"))
+            item.setPen(pen)
+            self.recalc_segments()
+            print("Unselected bending line. Segment removed.")
+            return
+        print("Selecting bending line with x =", new_line_x)
+        item.setData(1, "selected")
+        pen = QPen(QColor("magenta"))
+        pen.setWidth(2)
+        item.setPen(pen)
+        self.insert_segment_sorted(new_line_x, line_id=id(item))
+        print("Selected bending line. New segment inserted.")
+
     def update_v_input(self):
-        """Aktualizuje listę dostępnych szerokości matryc po zmianie grubości."""
         selected_grubosc = self.grubosc_input.currentText()
         if self.data is not None:
             try:
@@ -265,51 +440,100 @@ class MainWindow(QMainWindow):
             self.V_input.clear()
             self.V_input.addItems([str(x) for x in V_values])
 
-    def add_segment(self):
-        """Dodaje nowy segment do tabeli."""
-        row_count = self.table.rowCount()
-        self.table.insertRow(row_count)
-        dlugosc_item = QTableWidgetItem("100")
-        kat_item = QTableWidgetItem("90")
-        bd_item = QTableWidgetItem("")
-        bd_item.setFlags(Qt.ItemIsEnabled)
-        self.table.setItem(row_count, 0, dlugosc_item)
-        self.table.setItem(row_count, 1, kat_item)
-        self.table.setItem(row_count, 2, bd_item)
+    def recalc_segments(self):
+        n = self.table.rowCount() - 1
+        if n <= 0:
+            return
+        segments = []
+        for row in range(n):
+            item = self.table.item(row, 0)
+            if item is not None:
+                absolute_x = item.data(Qt.UserRole + 1)
+                segments.append((row, absolute_x))
+        segments.sort(key=lambda x: x[1])
+        prev_x = None
+        for (row, absolute_x) in segments:
+            if prev_x is None:
+                segment_value = absolute_x
+            else:
+                segment_value = absolute_x - prev_x
+            prev_x = absolute_x
+            self.table.item(row, 0).setText(f"{segment_value:.2f}")
 
-    def remove_segment(self):
-        """Usuwa zaznaczony segment z tabeli."""
-        selected_rows = set(idx.row() for idx in self.table.selectionModel().selectedIndexes())
-        for row in sorted(selected_rows, reverse=True):
-            self.table.removeRow(row)
+    def find_segment_row_by_line_id(self, line_id):
+        for row in range(self.table.rowCount() - 1):
+            item = self.table.item(row, 0)
+            if item is not None and item.data(Qt.UserRole) == line_id:
+                return row
+        return None
+
+    def remove_segment_by_button(self):
+        button = self.sender()
+        if button:
+            for row in range(self.table.rowCount()):
+                widget = self.table.cellWidget(row, 3)
+                if widget is button:
+                    item = self.table.item(row, 0)
+                    if item is not None:
+                        line_id = item.data(Qt.UserRole)
+                        if line_id is not None:
+                            for scene_item in self.dxf_scene.items():
+                                if (isinstance(scene_item, QGraphicsLineItem) and
+                                        scene_item.data(1) == "selected" and
+                                        id(scene_item) == line_id):
+                                    pen = QPen(QColor("yellow"))
+                                    scene_item.setPen(pen)
+                                    scene_item.setData(1, None)
+                                    print("Minus clicked: Unselected bending line with id", line_id)
+                                    break
+                    self.table.removeRow(row)
+                    break
+        if self.table.rowCount() == 0:
+            self.add_plus_row()
+        else:
+            self.recalc_segments()
+
+    def insert_segment_sorted(self, new_x, line_id):
+        insertion_index = self.table.rowCount() - 1
+        for row in range(self.table.rowCount() - 1):
+            item = self.table.item(row, 0)
+            if item is not None:
+                existing_x = item.data(Qt.UserRole + 1)
+                if existing_x is None:
+                    existing_x = 0.0
+                if new_x < existing_x:
+                    insertion_index = row
+                    break
+        self.insert_segment_row(insertion_index, absolute_x=new_x, default_angle=90, line_id=line_id)
+        self.recalc_segments()
+
+    def add_segment_via_plus_with_defaults(self, default_length=100, default_angle=90, line_id=None):
+        self.remove_all_plus_rows()
+        plus_row_index = self.table.rowCount()
+        self.insert_segment_row(plus_row_index, absolute_x=default_length, default_angle=default_angle, line_id=line_id)
+        self.add_plus_row()
+        self.recalc_segments()
 
     def calculate_total_bd(self):
-        """Oblicza łączną długość i ubytek materiału."""
         try:
             material = self.material_input.currentText()
             total_length = 0.0
             total_bd = 0.0
-
-            for row in range(self.table.rowCount()):
+            for row in range(self.table.rowCount() - 1):
                 dlugosc_item = self.table.item(row, 0)
                 kat_item = self.table.item(row, 1)
-
                 if not dlugosc_item or not kat_item:
                     continue
-
                 dlugosc = float(dlugosc_item.text())
                 kat = float(kat_item.text())
                 grubosc = float(self.grubosc_input.currentText())
                 V = float(self.V_input.currentText())
-
                 bd_value = 0.0 if kat == 0 else self.model.oblicz_bd(grubosc, V, kat, material)
                 total_length += dlugosc
                 total_bd += bd_value
-
                 bd_item = QTableWidgetItem(f"{bd_value:.2f}")
                 bd_item.setFlags(Qt.ItemIsEnabled)
                 self.table.setItem(row, 2, bd_item)
-
             self.result_label.setText(
                 f"Łączna Długość: {total_length:.2f} mm\nŁączny Ubytek (BD): {total_bd:.2f} mm"
             )
@@ -317,13 +541,9 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Błąd", f"Wystąpił błąd podczas obliczania BD:\n{e}")
 
     def populate_comboboxes(self):
-        """Wypełnia listy rozwijane wartościami na podstawie danych."""
         if self.data is not None:
-            # Pobierz unikalne wartości grubości
             grubosc_values = sorted(self.data['Grubosc'].unique())
             self.grubosc_input.clear()
             self.grubosc_input.addItems([str(x) for x in grubosc_values])
-
-            # Automatycznie zaktualizuj V_input na podstawie pierwszej grubości
             if grubosc_values:
                 self.update_v_input()
